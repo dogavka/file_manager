@@ -1,0 +1,337 @@
+<?php
+
+/*
+КОММЕРЧЕСКАЯ ТАЙНА
+ООО "Индекс"                                 http://www.index-crm.ru
+620075 г. Екатеринбург, ул. Первомайская, 44    тел. (343) 355-50-30
+*/
+
+include_once("util.ext");
+include_once("language.ext");
+
+//Access right levels
+define("ACCESS_NONE",0);
+define("ACCESS_READ",1);
+define("ACCESS_FULL",2);
+
+class Authorisator {
+ var $userid;		// ID of current user
+ var $username;		// Name of current user
+ var $login;            // Login of current user
+ var $subst;            // Substitution user
+ var $sgroup;           // Substitution group
+ var $session;		// Session of current user
+ var $authmode;		// Authentication mode (see defines)
+ var $errortext;	// Description of last error
+ var $ugroup;		// User's group
+ var $internal;		// Internal group member
+ var $last_login;	// Date of user's current login
+ var $prev_login;	// Date of user's previous login
+ var $STRINGTABLE;	// localization
+ public $gmt_shift;
+
+ //Return last error happened
+ function LastError() {
+  if($this->errortext!="") return $this->errortext."<br>";
+  else return false;
+  }
+
+ // Initialise class
+ function Authorisator($authmode_=AUTH_SITE) {
+  global $auth_mode,$STRINGTABLES;
+  if($auth_mode) $this->authmode=$auth_mode;
+  else $this->authmode=$authmode_;
+  $this->STRINGTABLE=$STRINGTABLES["authorisator"];
+  }
+
+ function Authorise() {
+  global $connid,$PHP_AUTH_USER,$_SERVER,$auth_id,$auth_name,$salttable;
+  global $ldap_host,$ldap_username,$ldap_password,$ldap_rdn,$ldap_realm;
+  if($this->userid) return;
+  $this->errortext="";
+  if($this->authmode & AUTH_APACHE) {
+   $this->username=$PHP_AUTH_USER;
+   if(!$this->username) $this->username=$_SERVER["REDIRECT_REMOTE_USER"];
+   }
+  if($this->authmode & AUTH_LDAP) {
+   if(!$this->username) $this->username=$_REQUEST["username"];
+   if(!$ldc=ldap_connect($ldap_host,3268))
+    report_error("Невозможно соединиться с сервером LDAP");
+   if(!ldap_bind($ldc,$this->username."@".$ldap_realm,cleanup($_REQUEST["password"])))
+    report_error("Невозможно авторизоваться");
+   $rdns=explode(";",$ldap_rdn);
+   foreach($rdns as $ind=>$irdn) {
+    $rdn=$irdn.",".realm2dc($ldap_realm);
+    $filter="(&(objectclass=user)(!(objectclass=computer))(anr=".$this->username."))";
+    if(!$res=ldap_search($ldc,$rdn,$filter))
+     report_error("Ошибка обращения к каталогу");
+    $entry=ldap_get_entries($ldc,$res);
+    }
+   ldap_unbind($ldc);
+   if($entry["count"]<=0) {
+    $this->errortext=$this->STRINGTABLE["invalid_credentials"];
+    return;
+    }
+   }
+  if($this->authmode & AUTH_SITE)
+   $this->username=$_REQUEST["username"];
+  if($this->username!="") {
+   $this->username=cleanup($this->username);
+   if(($this->authmode & AUTH_APACHE)||($this->authmode & AUTH_LDAP)) {
+    $SQLStmt="SELECT id FROM users WHERE login='".$this->username."' AND (fired=0 OR fired IS NULL)";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_user"]; return; }
+    if($row=sql_fetch_array($result))
+     $this->userid=$row["id"];
+    }
+   if($this->authmode & AUTH_SITE) {
+    $password=cleanup($_REQUEST["password"]);
+    $SQLStmt="SELECT id,fired,name,ugroup,gmt_shift,login,prev_login,pass FROM users WHERE login='".$this->username."'AND pass=PASSWORD('".$password."')";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_user"]; return; }
+    while($row=sql_fetch_array($result)) {
+     $SQLStmt="SELECT PASSWORD(CONCAT(PASSWORD('".$password."'),'".$salttable[$row["id"]%sizeof($salttable)]."'))";
+     if(!($rresult=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_user"]; return; }
+     if($rrow=sql_fetch_array($rresult)) {
+      if($rrow[0]!=$row["pass"])
+       continue;
+      }
+     if($row["fired"]) { $this->errortext="Доступ в систему данному пользователю запрещен."; return; }
+     $this->userid=$row["id"];
+     $this->username=$row["name"];
+     $this->login=$row["login"];
+     $this->prev_login=$row["prev_login"];
+     $this->gmt_shift=$row["gmt_shift"];
+     $ugroup=$row["ugroup"]>0?$row["ugroup"]:0;
+     $this->ugroup=$ugroup;
+     $SQLStmt="SELECT internal FROM usergroups WHERE id=$ugroup";
+     if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_group"]; return; }
+     if($row=sql_fetch_array($result))
+      $this->internal=$row["internal"];
+     else { $this->errortext=$this->STRINGTABLE["error_group_info"]; return; }
+     $found=true;
+     }
+    if(!$found) {
+     $this->errortext=$this->STRINGTABLE["invalid_credentials"];
+     return;
+     }
+    }
+   if($this->userid) {
+    if($_SERVER["REMOTE_PORT"]>0) $divider=$_SERVER["REMOTE_PORT"];
+    else $divider=80;
+    $this->session=md5($this->userid*(time()%$divider));
+    $found=false;
+    $SQLStmt="SELECT COUNT(*) FROM users_log WHERE user='".$this->userid."' AND type=0 AND date=(SELECT last_action FROM users WHERE id='".$this->userid."')";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_create_session"]; return; }
+    if($row=sql_fetch_array($result)) {
+     if($row[0]>0)
+      $found=true;
+     }
+    if(!$found) {
+     $SQLStmt="INSERT INTO users_log SELECT id,last_action,0,NULL FROM users WHERE id='".$this->userid."'";
+     if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_create_session"]; return; }
+     }
+    $gd=getdate_();
+    $SQLStmt="UPDATE users SET prev_login=last_login WHERE id=".$this->userid;
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_create_session"]; return; }
+    $SQLStmt="UPDATE users SET session='".$this->session."',ip='".$_SERVER["REMOTE_ADDR"]."',last_login=now_(),last_action=now_(),current_status=1 WHERE id='".$this->userid."'";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_create_session"]; return; }
+    $SQLStmt="INSERT INTO users_log VALUES('".$this->userid."',now_(),1,NULL)";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_create_session"]; return; }
+    setcookie("auth_id",$this->userid);
+    setcookie("auth_name",$this->username);
+    setcookie("auth_session",$this->session);
+    $auth_id=$this->userid;
+    $auth_name=$this->username;
+    $_COOKIE["auth_id"]=$auth_id;
+    $_COOKIE["auth_name"]=$auth_name;
+    $_COOKIE["auth_session"]=$this->session;
+    $this->SetNeedAuth(true);
+    }
+   else
+    $this->errortext=$this->STRINGTABLE["invalid_credentials"];
+   }
+  else
+   $this->errortext=$STRINGTABLE["no_name_given"];
+  }
+
+ function SetNeedAuth ($go=false) {
+  if (strpos($_SERVER["REQUEST_URI"], "/tree")===false) {
+  if ($go) {
+   if (isset($_SESSION['need_auth_url'])) {
+    header("location: ".$_SESSION['need_auth_url']);
+    unset($_SESSION['need_auth_url']);
+    exit;
+   }
+  } elseif (!isset($_SESSION['need_auth_url'])) {
+   $_SESSION['need_auth_url']=$_SERVER["REQUEST_URI"];
+   header("location: /");
+   exit;
+  }
+  }
+ }
+ 
+ function CheckAuthorisation($external=false) {
+  global $connid,$live_session;
+  $this->errortext="";
+  if($this->userid) return true;
+  if($_COOKIE["auth_id"]>0) {
+   if(!$live_session) $live_session=1;
+   $SQLStmt="SELECT ip,fired,ugroup,session,gmt_shift,login,subst,timediff(date_add(last_action,interval ".$live_session." hour),now_()) `diff` FROM users WHERE id=".cleanup($_COOKIE["auth_id"]);
+   if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_getting_session"]; return; }
+   if($row=sql_fetch_array($result)) {
+    if($row["diff"][0]=="-") {
+     $this->errortext="Ваша сессия прекращена из-за истечения времени неактивности";
+     $this->SetNeedAuth();
+     return false;
+     }
+    if($row["fired"]>0) {
+     $this->errortext="Доступ в систему данному пользователю запрещен";
+     $this->SetNeedAuth();
+     return false;
+     }
+    if($row["session"]!=$_COOKIE["auth_session"]) { $this->errortext="Your session was lost"; $this->SetNeedAuth(); return false; }
+    if($row["ip"]!=$_SERVER["REMOTE_ADDR"]) { $this->errortext=$this->STRINGTABLE["wrong_ip"]; $this->SetNeedAuth(); return false; }
+    $this->login=$row["login"];
+    $this->gmt_shift=$row["gmt_shift"];
+    $ugroup=$row["ugroup"]>0?$row["ugroup"]:0;
+    $this->ugroup=$ugroup;
+    if($row["subst"])
+     $this->subst=$row["subst"];
+    $SQLStmt="SELECT internal FROM usergroups WHERE id='".$ugroup."'";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_group"]; return; }
+    if($row=sql_fetch_array($result))
+     $this->internal=$row["internal"];
+    else { $this->errortext=$this->STRINGTABLE["error_group_info"]; return; }
+    if($this->subst) {
+     $SQLStmt="SELECT ugroup FROM users WHERE id='".$this->subst."'";
+     if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_getting_session"]; return; }
+     if($row=sql_fetch_array($result))
+      $this->sgroup=$row["ugroup"];
+     }
+    $SQLStmt="UPDATE users SET last_action=now_() WHERE id='".$_COOKIE["auth_id"]."'";
+    if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_group"]; return; }
+    }
+   $this->userid=$_COOKIE["auth_id"];
+   $this->username=$_COOKIE["auth_name"];
+   $this->session=$_COOKIE["auth_session"];
+//   if((!$external)&&(!$this->internal)) return false;
+   return true;
+   }
+  else
+   $this->SetNeedAuth();
+   return false;
+  }
+
+ function GetUserName() {
+  return $this->username;
+  }
+
+ function GetUserLogin() {
+  return $this->login;
+  }
+
+ function GetUserGroup() {
+  return $this->ugroup;
+  }
+
+ function IsManager() {
+  global $manager_groups;
+  $mg=explode(",",$manager_groups);
+  if(sizeof($mg)>0)
+   return in_array($this->ugroup,$mg);
+  else
+   return false;
+  }
+
+ function GetUserLastLogin() {
+  return $this->last_login;
+  }
+
+ function GetUserPrevLogin() {
+  return $this->prev_login;
+  }
+
+ function GetSubstitution() {
+  return $this->subst;
+  }
+
+ function GetSubstitutionGroup() {
+  return $this->sgroup;
+  }
+
+ function IsWebmaster() {
+  global $CONSTANTS;
+  $this->errortext="";
+  foreach($CONSTANTS["webmaster"] as $ind=>$id) {
+   if($id==$this->userid)
+    return true;
+   }
+  return false;
+  }
+
+ function GetRightsOnSection($sect) {
+  global $host,$uname,$pass,$dbname;
+  $this->errortext="";
+  if($this->IsWebmaster())
+   return ACCESS_FULL;
+  $iconnid=mysql_connect($host,$uname,$pass,$dbname);
+  if(!mysql_select_db($dbname,$iconnid)) { $this->errortext=$this->STRINGTABLE["cannot_select_db"]; return ACCESS_NONE; }
+  $res=0;
+  $SQLStmt="SELECT access FROM UsersSections WHERE Users=".$this->userid." AND Sections=".$sect;
+  if(!($result=sql_query($SQLStmt,$iconnid))) { $this->errortext=$this->STRINGTABLE["error_getting_rights"]; return ACCESS_NONE; }
+  while($row=sql_fetch_array($result))
+   $res=$row["access"];
+  return $res;
+  }
+
+ function UserAllowed($specsection) {
+  global $host,$uname,$pass,$dbname;
+  $this->errortext="";
+  if($this->IsWebmaster())
+   return true;
+  $iconnid=mysql_connect($host,$uname,$pass,$dbname);
+  if(!mysql_select_db($dbname,$iconnid)) { $this->errortext=$this->STRINGTABLE["cannot_select_db"]; return false; }
+  $res=false;
+  $SQLStmt="SELECT id FROM SpecialSections WHERE module='".$specsection."'";
+  if(!($result=sql_query($SQLStmt,$iconnid))) { $this->errortext=$this->STRINGTABLE["error_getting_rights"]; return; }
+  while($row=sql_fetch_array($result))
+   $moduleid=$row["id"];
+  $SQLStmt="SELECT COUNT(*) FROM SpecialSectionsUsers WHERE Users=".$this->userid." AND SpecialSections =$moduleid";
+  if(!($result=sql_query($SQLStmt,$iconnid))) { $this->errortext=$this->STRINGTABLE["error_getting_rights"]; return; }
+  while($row=sql_fetch_array($result))
+   if($row[0]>0) $res=true;
+  return $res;
+  }
+
+ function GetUserID() {
+  return $this->userid;
+  }
+
+ function IsInternalGroup($id=0) {
+  global $connid;
+  if($id==0) return $this->internal;
+  if(!id) return false;
+  $SQLStmt="SELECT ugroup FROM users WHERE id=$id";
+  if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_user"]; return false; }
+  if($row=sql_fetch_array($result)) {
+   $ugroup=$row["ugroup"]>0?$row["ugroup"]:0;
+   $SQLStmt="SELECT internal FROM usergroups WHERE id=$ugroup";
+   if(!($result=sql_query($SQLStmt,$connid))) { $this->errortext=$this->STRINGTABLE["error_user"]; return false; }
+   if($row=sql_fetch_array($result)) {
+    if($row["internal"]!=1) return false;
+    else return true;
+    }
+   }
+  return false;
+  }
+
+}
+
+function realm2dc($realm) {
+ $fields=explode('.',$realm);
+ $dc='';
+ foreach($fields as $i=>$field)
+  $dc.=($i>0?',':'')."dc=$field";
+ return $dc;
+ }
+
+?>

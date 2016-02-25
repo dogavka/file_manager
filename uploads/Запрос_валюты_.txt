@@ -1,0 +1,15 @@
+DROP FUNCTION IF EXISTS get_currency//
+
+CREATE FUNCTION `get_currency`(offer INT) RETURNS varchar(10)
+BEGIN
+DECLARE currency VARCHAR(10) DEFAULT NULL;
+DECLARE num_curr INT DEFAULT 0;
+SELECT curr INTO num_curr FROM offers  WHERE id = offer;
+CASE num_curr  
+  WHEN 1 THEN SET currency = "USD";   
+  WHEN 2 THEN SET currency = "EUR";   
+  WHEN 3 THEN SET currency = "RUR";  
+  ELSE SET currency = '';   
+ END CASE;
+RETURN currency;
+END//

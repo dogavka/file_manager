@@ -1,0 +1,736 @@
+<?php
+
+class offers extends documents {
+
+ public $item;
+ protected $binder;
+ protected $access;
+ protected $access_current;
+ protected $module;
+ public $errorcode;
+ public $result;
+ public $client;
+ public $bm;
+ protected $file;
+ protected $filename;
+ protected $fdname;
+ protected $unclosed;
+ protected $syear; protected $smonth; protected $sday;
+ protected $eyear; protected $emonth; protected $eday;
+
+ function offers($iddoc) {
+  global $connid,$auth,$filesaves;
+  $this->table="offers";
+  $this->support_dfilters=true;
+  $this->settings=new UserSettings("offers");
+  if($_REQUEST["filterlist"]) {
+   if($_POST["unclosed"]=="on")
+    $this->unclosed=1;
+   else
+    $this->unclosed=0;
+   $this->settings=new UserSettings($this->table);
+   $this->settings->SetValue("unclosed",$this->unclosed);
+   }
+  $this->unclosed=$this->settings->values["unclosed"];
+  parent::documents($iddoc);
+  $this->config->PermanentDelete();
+  if($_REQUEST["onbase"]) $this->CreateOnBase($_REQUEST["offer"]);
+  if($this->item) {
+   $bms=Array("Предложение","Товары","Файлы");
+   $SQLStmt="SELECT COUNT(*) FROM offers_goods WHERE offers='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting module id");
+   if($row=sql_fetch_array($result)) {
+    if($row[0]>0)
+     $bms[1].=" (".$row[0].")";
+    }
+   $SQLStmt="SELECT COUNT(*) FROM offers_files WHERE offers='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting module id");
+   if($row=sql_fetch_array($result)) {
+    if($row[0]>0)
+     $bms[2].=" (".$row[0].")";
+    }
+   }
+  else
+   $bms=Array("Предложение");
+  if($bms) {
+   $this->bm=new Bookmarks();
+   $this->bm->SetBookmarks($bms);
+   $this->bm->HandleBookmark();
+   $this->setup_config();
+   switch($this->bookmark=$this->bm->GetCurrentBookmark()) {
+   case 1:
+    $this->bookmark_1();
+    break;
+   case 2:
+    $this->bookmark_2();
+    break;
+   case 3:
+    $this->bookmark_3();
+    break;
+    }
+   }
+  $this->setup_navigation();
+  $this->HandleAddFor();
+  $this->HandleCopy();
+  }
+
+ function HandleCopy() {
+  global $connid,$auth;
+  if($_REQUEST["copy_record_x"]) {
+   $SQLStmt="SELECT COUNT(*) FROM offers WHERE number='".$_REQUEST["target_number"]."' AND del=0";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error copying document");
+   if($row=sql_fetch_array($result)) {
+    if($row[0]>0) {
+     $this->errorcode="Документ с таким номером уже существует.";
+     return;
+     }
+    }
+   $SQLStmt="SELECT * FROM offers WHERE id='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error copying document");
+   if($row=sql_fetch_array($result)) {
+    foreach($row as $i=>$r) {
+     if(($i>0)||($i===0)) continue;
+     if(($i=="id")||($i=="date")||($i=="manager")||($i=="number")) continue;
+     if(!$r) continue;
+     $fc.=","; $vc.=",";
+     $fc.=$i;
+     $vc.="'".$r."'";
+     }
+    $SQLStmt="INSERT INTO offers (number,date,manager$fc) VALUES('".$_REQUEST["target_number"]."','".$_REQUEST["copy_year"]."-".$_REQUEST["copy_mon"]."-".$_REQUEST["copy_day"]."','".$auth->GetUserId()."'$vc)";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error copying document");
+    $SQLStmt="SELECT LAST_INSERT_ID()";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error copying document");
+    if($row=sql_fetch_array($result)) {
+     $nd=$row[0];
+     if($nd) {
+      $SQLStmt="SELECT * FROM offers_goods WHERE offers='".$this->item."'";
+      if(!($result=sql_query($SQLStmt,$connid))) report_error("Error copying document");
+      while($row=sql_fetch_array($result)) {
+       $fc=""; $vc="";
+       foreach($row as $i=>$r) {
+        if(($i>0)||($i===0)) continue;
+        if(($i=="id")||($i=="offers")) continue;
+        if(!$r) continue;
+        $fc.=","; $vc.=",";
+        $fc.=$i;
+        $vc.="'".$r."'";
+        }
+       $SQLStmt="INSERT INTO offers_goods (offers$fc) VALUES('".$nd."'$vc)";
+       sql_query($SQLStmt,$connid);
+       }
+      }
+     $this->result.="Документ скопирован";
+     }
+    }
+   }
+  }
+
+ function setup_config() {
+  global $auth,$connid,$manager_groups,$diff_org;
+  $fields=Array("id","number","date","client","manager");
+  $names=Array("","Номер","Дата","Клиент","Менеджер");
+  $types=Array(INTEGER_TYPE,STRING_TYPE,DATE_TYPE,SELECT_POPUP,POINTER);
+  $this->config->SetTableDescription("offers",$fields,$names,$types,"id","number");
+  $this->config->LoadExtraFields();
+  if(!$diff_org)
+   $this->config->DeleteField("org");
+  $this->config->DescribeSelectPopupField("client","/dialogs/FindClient.php",$this->item.",'offers'","clients","id","name");
+  $this->config->DescribePointerField("manager","users","id","name",($manager_groups?" WHERE ugroup IN($manager_groups) ":""));
+  $this->config->SetCurrentRecord($this->item);
+  if(($this->item==0)&&($_REQUEST["client"])) {
+   $this->config->SetFieldValue("client",$_REQUEST["client"]);
+   $this->client=$_REQUEST["client"];
+   }
+  $gd=getdate_();
+  $cd=$gd["year"]."-".($gd["mon"]<10?"0":"").$gd["mon"]."-".($gd["mday"]<10?"0":"").$gd["mday"];
+  if($auth->IsManager())
+   $this->config->OverrideField("manager",INTEGER_TYPE,"");
+  if(!$this->item) {
+   $this->config->SetFieldValue("date",$cd);
+   $this->config->SetFieldValue("manager",$auth->GetUserId());
+   }
+  }
+
+ function bookmark_1() {
+  global $auth,$connid,$filesaves;
+  $this->page1=true;
+  if($_REQUEST["record_delete"]) {
+   $SQLStmt="DELETE FROM offers_goods WHERE offers='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error deleting offer");
+   $SQLStmt="SELECT file,files FROM files,offers_files WHERE offers='".$this->item."' AND files.id=offers_files.files";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer files");
+   while($row=sql_fetch_array($result)) {
+    unlink($filesaves."/".$row["file"]);
+    $SQLStmt="DELETE FROM files WHERE file='".$row["file"];
+    if(!($rresult=sql_query($SQLStmt,$connid))) report_error("Error getting offer files");
+    }
+   $SQLStmt="DELETE FROM offers_files WHERE offers='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer files");
+   }
+  elseif(($_REQUEST["record_save"])&&($this->item)) {
+   $SQLStmt="SELECT COUNT(*) FROM sales WHERE offer='".$this->item."' AND date<'".$_REQUEST["field_date_year"]."-".$_REQUEST["field_date_mon"]."-".$_REQUEST["field_date"]."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer files");
+   if($row=sql_fetch_array($result)) {
+    if($row[0]>0)
+     $this->errorcode="Предложение не может иметь более позднюю дату, чем продажа, созданная на его основе.";
+    }
+   }
+  if((!$_REQUEST["field_manager"])&&($_REQUEST["record_create"]))
+   $_REQUEST["field_manager"]=$auth->GetUserId();
+  if(!$this->errorcode)
+   $this->result.=$this->config->HandleForm(true);
+  else {
+   header('Content-type: text/xml; charset=windows-1251');
+   header("Expires: Mon, 26 Jul 1997 05:00:00 GMT");
+   header("Cache-Control: no-cache, must-revalidate");
+   header("Pragma: no-cache");
+   header("Last-Modified: ".gmdate("D, d M Y H:i:s")."GMT");
+   echo('<?xml version="1.0" encoding="Windows-1251"?'); echo('>');
+   echo("<XMLDATA VERSION=\"1\"><RESULT STATUS=\"0\" MESSAGE=\"".$this->errorcode."\"/></XMLDATA>");
+   exit;
+   }
+  if($this->config->current_record>0) {
+   $SQLStmt="SELECT client FROM offers WHERE id='".$this->config->current_record."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   if($row=sql_fetch_array($result))
+    $this->client=$row["client"];
+   }
+  if(($this->config->current_record)&&(!$this->item)) {
+   if($_REQUEST["record_create"]) {
+    if(!$_REQUEST["field_number"]) {
+     $SQLStmt="UPDATE offers SET number='".$this->config->current_record."' WHERE id='".$this->config->current_record."'";
+     if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+     }
+    $wf=new workflow;
+    if($_REQUEST["close_task"])
+     $wf->CloseSpecificTask($_REQUEST["close_task"],$this->config->current_record);
+    else
+     $wf->OnCreateDocument($this->module,$this->config->current_record);
+    }
+   if($_REQUEST["xsubmit"]) exit;
+   try_redirect("Location: /?id=".$this->iddoc."&idi=".$this->config->current_record);
+   }
+  if($_REQUEST["xsubmit"]) exit;
+  if($_REQUEST["record_delete"]) {
+   unset($this->item);
+   try_redirect("Location: ".$this->serializeQueryString(true,true));
+   }
+  $this->errorcode.=$this->config->LastError();
+  }
+
+ function bookmark_2() {
+  global $auth,$connid;
+  if($this->item) {
+   $this->page2=true;
+   // manipulations with prices
+   if(($_REQUEST["changeprice"])&&($this->access_current>=2)) {
+    $coeff=1+$_REQUEST["percent"]/100;
+    $SQLStmt="UPDATE offers_goods SET price=price*".$coeff." WHERE offers='".$this->item."'";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+    $this->result.="Цены изменены";
+    }
+   elseif(($_REQUEST["loadprice"])&&($this->access_current>=2)) {
+    $goods=Array();
+    $SQLStmt="SELECT goods FROM offers_goods WHERE offers='".$this->item."'";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+    while($row=sql_fetch_array($result))
+     array_push($goods,$row["goods"]);
+    foreach($goods as $good) {
+     $SQLStmt="SELECT price FROM goods WHERE id='".$good."'";
+     if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+     if($row=sql_fetch_array($result))
+      $price=$row["price"];
+     $SQLStmt="UPDATE offers_goods SET price='".$price."' WHERE offers='".$this->item."' AND goods='".$good."'";
+     if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+     }
+    $this->result.="Цены загружены";
+    }
+   $this->binder=new binder;
+   $this->binder->SetAccess($this->access_current);
+   $fields=Array("id","name");
+   $names=Array("","Название");
+   $types=Array(INTEGER_TYPE,STRING_TYPE);
+   $this->binder->DescribeBinding("goods","offers","offers_goods","id","name","id",$this->item,"/config/Engine/UniTree.php","parentname=parent_levelname=categories_itemsname=goods_parentref=category_parentorder=name_itemsorder=name_extreturn=id,name,price");
+   $this->binder->SetExtendedParams("id,amount,price");
+   $this->binder->HandleForm();
+   }
+  }
+
+ function bookmark_3() {
+  global $auth,$connid,$filesaves;
+  // manipulations with files
+  if($this->item) {
+   $this->page3=true;
+   $this->file=Array();
+   $this->filename=Array();
+   $this->fdname=Array();
+   $nf=0;
+   $SQLStmt="SELECT files FROM offers_files WHERE offers='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+   while($row=sql_fetch_array($result)) {
+    $this->file[$nf]=$row["files"];
+    $SQLStmt="SELECT name,file FROM files WHERE id='".$this->file[$nf]."'";
+    if(!($rresult=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+    if($rrow=sql_fetch_array($rresult)) {
+     $this->filename[$nf]=$rrow["name"];
+     $this->fdname[$nf]=$rrow["file"];
+     }
+    $nf++;
+    }
+   if($_REQUEST["delete_file"]) {
+    foreach($_REQUEST as $ind=>$value) {
+     if((strncmp($ind,"remove_",7)==0)&&($value=="on")) {
+      $idf=substr($ind,7);
+      if($idf>0) {
+       unset($indf);
+       for($a=0;$a<$nf;$a++) {
+        if($idf==$this->file[$a])
+         $indf=$a;
+        }
+       if(isset($indf)) {
+        if(($this->fdname[$indf])&&(file_exists($filesaves."/".$this->fdname[$indf]))) {
+         unlink($filesaves."/".$this->fdname[$indf]);
+         $SQLStmt="DELETE FROM files WHERE file='".$this->fdname[$indf]."'";
+         if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+         }
+        $SQLStmt="DELETE FROM offers_files WHERE offers='".$this->item."' AND files='".$this->file[$indf]."'";
+        if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+		 $SQLStmt="DELETE FROM clients_files WHERE files='".$this->file[$indf]."'";
+        if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+        $this->result.="Файл удален";
+        unset($this->file[$indf]); unset($this->filename[$indf]); unset($this->fdname[$indf]);
+        }
+       }
+      }
+     }
+    }
+   elseif($_REQUEST["upload"]) {
+    unset($_REQUEST["upload"]);
+    $ext=substr($_FILES["userfile"]["name"],strpos($_FILES["userfile"]["name"],"."));
+    $fname=md5(uniqid(rand())).$ext;
+    if(!move_uploaded_file($_FILES["userfile"]["tmp_name"],$filesaves."/".$fname)) $this->errorcode="Ошибка загрузки файла.";
+    $SQLStmt="INSERT INTO files (name,file) VALUES('".$_FILES["userfile"]["name"]."','".$fname."')";
+    if(sql_query($SQLStmt,$connid)) {
+     $this->result.="Файл загружен";
+     $SQLStmt="SELECT LAST_INSERT_ID()";
+     if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+     if($row=sql_fetch_array($result)) {
+      $newf=$row[0];
+      $this->file[$nf]=$newf;
+      $this->filename[$nf]=$_FILES["userfile"]["name"];
+      $this->fdname[$nf++]=$fname;
+      $SQLStmt="INSERT INTO offers_files (offers,files) VALUES('".$this->item."','".$newf."')";
+	  if(!($result=sql_query($SQLStmt,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+	  }
+	  if($this->item>0) {
+	  $SQLstr="SELECT client FROM offers WHERE id='".$this->item."'";
+	  if(!($result=sql_query($SQLstr,$connid))) report_error("Error getting client information for upload file");
+	  if($row=sql_fetch_array($result)) {
+      $id=$row["client"];
+	  $SQLstr="INSERT INTO clients_files (clients, files, date, author) values (".$id.", '".$newf."', NOW(), '".$auth->GetUserID()."')";
+	  if(!($result=sql_query($SQLstr,$connid))) report_error($CONSTANTS["db_unspecified_error"]);
+	  }
+      }
+	  }
+    else
+     $this->errorcode="Ошибка загрузки файла";
+    }
+   if($_REQUEST["send_message"]) {
+    $SQLStmt="SELECT name,email FROM clients WHERE id=(SELECT client FROM offers WHERE id='".$this->item."')";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting client information");
+    if($row=sql_fetch_array($result)) {
+     $r_mail=$row["email"];
+     $r_name=str_replace("&quot;","\"",$row["name"]);
+     }
+    $SQLStmt="SELECT name,email FROM users WHERE id='".$auth->GetUserId()."'";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting manager information");
+    if($row=sql_fetch_array($result)) {
+     $s_mail=$row["email"];
+     $s_name=str_replace("&quot;","\"",$row["name"]);
+     }
+    $lnewline=chr(13).chr(10);
+    $hdr="From: ".$s_name." <".$s_mail.">".$lnewline."To: ".$r_name." <".$r_mail.">".$lnewline."Subject: ".$_REQUEST["subject"];
+    foreach($_REQUEST as $ind=>$value) {
+     if(strncmp($ind,"attach",6)==0) {
+      $idf=substr($ind,6);
+      $SQLStmt="SELECT * FROM files WHERE id='".$idf."'";
+      if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting client information");
+      if($row=sql_fetch_array($result)) {
+       $fd=fopen($filesaves."/".$row["file"],"r");
+       $mailbody=fread($fd,filesize($filesaves."/".$row["file"]));
+       fclose($fd);
+       if($mailbody) {
+        $lbase64attachment=base64_encode($mailbody);
+        for($a=0;$a<strlen($lbase64attachment);$a++) {
+         $res.=$lbase64attachment[$a];
+         if((($a%76)==0)&&($a>0)) $res.=$lnewline;
+         }
+        $lbase64attachment=$res;
+        $lmessage.=$lnewline."Content-Type: application/octet-stream; name=\"".$row["name"]."\"".$lnewline."Content-Transfer-Encoding: base64".$lnewline."Content-Disposition: attachment; filename=\"".$row["name"]."\"".$lnewline."".$lnewline.$lbase64attachment.$lnewline."----8F120373F942D71";
+        }
+       unset($mailbody); unset($res);
+       }
+      }
+     }
+    $lheader=$hdr.$lnewline."Content-type: multipart/mixed; boundary=\"--8F120373F942D71\"".$lnewline.$lnewline;
+    $lmessage="----8F120373F942D71".$lnewline."Content-Type: text/plain; charset=Windows-1251".$lnewline."Content-Transfer-Encoding: 8bit".$lnewline.$lnewline.$_REQUEST["message"].$lnewline.$lnewline."----8F120373F942D71".$lmessage."--";
+    global $defrelay;
+    if(sendmail_customheaders($s_mail,$r_mail,$defrelay,$lmessage,$lheader)) {
+     $this->result.="Сообщение успешно отправлено";
+     outlog("Менеджером $s_name отправлено e-mail сообщение клиенту $r_name");
+     }
+    }
+   }
+  }
+
+ function setup_navigation() {
+  $this->unclosed=$this->settings->values["unclosed"];
+  GetPeriodForm("","","","","","","offers");
+  $this->sday=$_REQUEST["sd"]; $this->smonth=$_REQUEST["sm"]; $this->syear=$_REQUEST["sy"];
+  $this->eday=$_REQUEST["ed"]; $this->emonth=$_REQUEST["em"]; $this->eyear=$_REQUEST["ey"];
+  if($_REQUEST["created_onbase"]) $this->result.="Создано корректирующее предложение";
+  if($this->client)
+   AddHeadCode("var global_client='".$this->client."';");
+  }
+
+ function GetUID() {
+  return "offers";
+  }
+
+ function PrintLabel() {
+  return "Предложения";
+  }
+
+ function CreateOnBase($offer) {
+  global $connid,$auth;
+  $SQLStmt="SELECT * FROM offers WHERE id='".$offer."'";
+  if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка создания предложения");
+  if($row=sql_fetch_array($result)) {
+   $gd=getdate_();
+   if(!$row["manager"]) $row["manager"]=$auth->GetUserId();
+   $c1="manager,date,offer";
+   $c2="'".$auth->GetUserId()."','".$gd["year"]."-".$gd["mon"]."-".$gd["mday"]."','".$offer."'";
+   foreach($row as $ind=>$value) {
+    if((is_numeric($ind))||($ind=="del")||($ind=="auto_create")||($ind=="number")||($ind=="date")||($ind=="rejected")||($ind=="rejected_date")||($ind=="offer")||($ind=="manager")||($ind=="id"))
+     continue;
+    $c1.=",".$ind;
+    $c2.=($value?",'".$value."'":",NULL");
+    }
+   $SQLStmt="INSERT INTO offers (".$c1.") VALUES(".$c2.")";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка создания предложения");
+   }
+  $SQLStmt="SELECT LAST_INSERT_ID()";
+  if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка создания предложения");
+  if($row=sql_fetch_array($result)) {
+   $SQLStmt="UPDATE offers SET number=id WHERE id='".$row[0]."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка создания предложения");
+   $lid=$row[0];
+   $wf=new workflow;
+   if($_REQUEST["close_task"])
+    $wf->CloseSpecificTask($_REQUEST["close_task"],$lid);
+   else
+    $wf->OnCreateDocument($this->module,$lid);
+   $rec=Array(); $nr=0;
+   $SQLStmt="SELECT * FROM offers_goods WHERE offers='".$offer."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error creating sale");
+   while($row=sql_fetch_array($result))
+    $rec[$nr++]=Array("amount"=>$row["amount"],"price"=>$row["price"],"goods"=>$row["goods"]);
+   for($a=0;$a<$nr;$a++) {
+    $SQLStmt="INSERT INTO offers_goods (offers,goods,amount,price) VALUES('".$lid."','".$rec[$a]["goods"]."','".$rec[$a]["amount"]."','".$rec[$a]["price"]."')";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка создания предложенияs");
+    }
+   try_redirect("Location: /?id=".$this->iddoc."&idi=".$lid."&created_onbase=true");
+   }
+  }
+
+ function Bookmarks() {
+  if($this->bm)
+   return $this->bm->DrawBookmarksEngine();
+  return Array();
+  }
+
+ function HandleAddFor() {
+  global $auth,$connid;
+  if($_REQUEST["addfor"]) {
+   $SQLStmt="INSERT INTO offers (manager,date,client) VALUES('".$auth->GetUserId()."',now_(),'".$_REQUEST["addfor"]."')";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   $SQLStmt="SELECT LAST_INSERT_ID();";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   if($row=sql_fetch_array($result)) {
+    $SQLStmt="UPDATE offers SET number=id WHERE id='".$row[0]."'";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+    try_redirect("Location: /?id=".$this->iddoc."&idi=".$row[0]);
+    }
+   }
+  }
+
+ function Linkages() {
+  global $connid;
+  $arr=parent::Linkages();
+  if($this->item) {
+   $arr["offer"]=$this->item;
+   // get sales based on this offer
+   $arr["sales"]=Array(); $ns=0;
+   $SQLStmt="SELECT id,DATE_FORMAT(date,'%d.%m.%Y') `date`,client `clientid`,ifnull(getvaluefordocument('clients','name',client,id,'sales'),(select name from clients where clients.id=sales.client)) `client`,getsum_sales(sales.id) `sum` FROM sales WHERE del=0 AND offer='".$this->item."' ORDER BY date DESC";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   while($row=sql_fetch_array($result))
+    $arr["sales"][$ns++]=Array("id"=>$row["id"],"date"=>$row["date"],"sum"=>formatPrice($row["sum"]),"odd"=>(($ns%2)==0?"":true),"client"=>$row["client"],"clientid"=>$row["clientid"]);
+   // get invoices based on this offer
+   $arr["invoices"]=Array(); $ni=0;
+   $SQLStmt="SELECT id,DATE_FORMAT(date,'%d.%m.%Y') `date`,client `clientid`,ifnull(getvaluefordocument('clients','name',client,id,'invoices'),(select name from clients where clients.id=invoices.client)) `client`,getsum_invoices(invoices.id) `sum` FROM invoices WHERE del=0 AND offer='".$this->item."' ORDER BY date DESC";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   while($row=sql_fetch_array($result))
+    $arr["invoices"][$ni++]=Array("id"=>$row["id"],"date"=>$row["date"],"sum"=>formatPrice($row["sum"]),"odd"=>(($ni%2)==0?"":true),"client"=>$row["client"],"clientid"=>$row["clientid"]);
+   // get offers based on this offer
+   $arr["succ"]=Array(); $nsc=0;
+   $SQLStmt="SELECT id,DATE_FORMAT(date,'%d.%m.%Y') `date`,ifnull(getvaluefordocument('clients','name',client,id,'offers'),(select name from clients where clients.id=offers.client)) `client`,client `clientid`,getsum_offers(offers.id) `amount` FROM offers WHERE del=0 AND offer='".$this->item."' ORDER BY date DESC";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   while($row=sql_fetch_array($result))
+    $arr["succ"][$nsc++]=Array("date"=>$row["date"],"id"=>$row["id"],"iddoc"=>$this->iddoc,"client"=>$row["client"],"amount"=>$row["amount"]>0?formatPrice($row["amount"]):0,"odd"=>(($nsc%2)==0?"":true),"clientid"=>$row["clientid"]);
+   // get properties if rejected
+   $SQLStmt="SELECT offer,rejected,DATE_FORMAT(rejected_date,'%d.%m.%Y') `rejected_date` FROM offers WHERE id='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+   if($row=sql_fetch_array($result)) {
+    $arr["reject_date"]=$row["rejected_date"];
+    $arr["reject_reason"]=$row["rejected"];
+    $arr["offer_onbase"]=$row["offer"];
+    // get properties of offer on which this one is based
+    if($arr["offer_onbase"]) {
+     $SQLStmt="SELECT DATE_FORMAT(date,'%d.%m.%Y') `date`,ifnull(getvaluefordocument('clients','name',client,id,'offers'),(select name from clients where clients.id=offers.client)) `client`,client `clientid`,getsum_offers(offers.id) `amount` FROM offers WHERE del=0 AND id='".$arr["offer_onbase"]."'";
+     if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+     if($row=sql_fetch_array($result)) {
+      $arr["date_onbase"]=$row["date"];
+      $arr["client_onbase"]=$row["client"];
+      $arr["clientid"]=$row["clientid"];
+      $arr["amount_onbase"]=$row["amount"]>0?formatPrice($row["amount"]):0;
+      }
+     }
+    }
+   if(($ns==0)&&($ni==0)&&(!$arr["succ"])&&(!$arr["reject_reason"])) {
+    $arr["offer"]=$this->item;
+    $arr["not_closed"]=true;
+    }
+   }
+  if($_REQUEST["reject"]) {
+   if($_REQUEST["reject_reason"]) {
+    $SQLStmt="UPDATE offers SET rejected='".$_REQUEST["reject_reason"]."',rejected_date=now_() WHERE id='".$this->item."'";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting offer information");
+    try_redirect("Location: ".$this->serializeQueryString(true,true));
+    }
+   else {
+    $arr["qs"]=$this->serializeQueryString(true,true);
+    $arr["reject_form"]=true;
+    }
+   }
+  return $arr;
+  }
+
+ function ManagementForm() {
+  global $connid;
+  $arr=Array();
+  $arr["qs"]=$this->serializeQueryString(true,true);
+  $arr["typename"]="Предложение";
+  $arr["iddoc"]=$this->iddoc;
+  $arr["client"]=$this->client;
+  if(!$this->item)
+   $title="Новое";
+  else {
+   $SQLStmt="SELECT number,DATE_FORMAT(date,'%d.%m.%Y') `sdate` FROM offers WHERE id='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка получения названия предложения");
+   if($row=sql_fetch_array($result)) {
+    if($row["number"])
+     $title=$row["number"];
+    $title.=" от ".$row["sdate"];
+    }
+   }
+  $arr=array_merge($arr,$this->config->RecordEditor($this->item,false,$title));
+  $arr["title"]=$title;
+  if($this->access==1) $arr["view"]=true;
+  if($this->item)
+   $arr["view"]=$this->access_current==2?false:true;
+  $arr["skipform"]=true;
+  $arr["cleantarget"]="idi";
+  return $arr;
+  }
+
+ function LinksSet() {
+  global $connid;
+  $arr=Array();
+  $arr["iddoc"]=$this->iddoc;
+  $arr["client"]=$this->client;
+  $arr["item"]=$arr["idi"]=$this->item;
+  if($this->item) {
+   $arr["view"]=$this->access_current==2?false:true;
+   $arr["can_copy"]=true;
+   }
+  $gd=getdate_();
+  $arr["today_day"]=$gd["mday"]; $arr["today_mon"]=$gd["mon"]; $arr["today_year"]=$gd["year"];
+  $arr["links"]=Array();
+  if($this->client)
+   array_push($arr["links"],Array("name"=>"Перейти к клиенту","href"=>"/?id=5&idi=".$this->client));
+  if($this->item) {
+   $SQLStmt="SELECT getsum_offers('".$this->item."')";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting module id");
+   if($row=sql_fetch_array($result))
+    $arr["amount"]=formatPrice($row[0]);
+   $SQLStmt="SELECT id FROM modules_menu WHERE uid='offers_history'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting module id");
+   if($row=sql_fetch_array($result)) {
+    $module=$row["id"];
+    if(GetAccessLevel($module,$this->item)==2)
+     array_push($arr["links"],Array("name"=>"История предложения","href"=>"/?id=19&ids=".$this->item));
+    }
+   $SQLStmt="SELECT curr FROM offers WHERE id='".$this->item."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting print templates");
+   if($row=sql_fetch_array($result)) {
+    switch($row["curr"]) {
+     case 1: $arr["currname"]="долларов США"; break;
+     case 2: $arr["currname"]="евро"; break;
+     default: $arr["currname"]="рублей";
+     }
+    }
+   }
+  $arr["qs"]=$this->SerializeQueryString(true,true,true,true);
+  $arr["printforms"]=Array(); $nf=0;
+  $SQLStmt="SELECT id,name FROM print_templates WHERE doctype='".$this->module."' AND active=1 ORDER BY name";
+  if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting print templates");
+  while($row=sql_fetch_array($result))
+   $arr["printforms"][$nf++]=Array("id"=>$row["id"],"name"=>$row["name"],"idi_print"=>$this->item,"doctype"=>$this->module);
+  return $arr;
+  }
+
+ function UploadForm() {
+  global $connid,$auth;
+  $arr=Array();
+  $arr["bookmark"]=3;
+  $arr["qs"]=$this->serializeQueryString(true,true);
+  if(!$_REQUEST["email_file"]) {
+   if(sizeof($this->filename)>0) {
+    $arr["loaded"]=true;
+    $arr["files"]=Array(); $arr["filename"]=Array(); $arr["fid"]=Array(); $nfs=0;
+    foreach($this->filename as $ind=>$fname) {
+     if(!$fname) continue;
+     $arr["files"][$nfs]=Array();
+     $arr["files"][$nfs]["filelink"]="/dialogs/GetFile.php?offers=$this->item&file=".$this->file[$ind]; //"/files/".$this->fdname[$ind];
+     $arr["files"][$nfs]["filename"]=$this->filename[$ind];
+     $arr["files"][$nfs]["odd"]=(($nfs%2)==0?"":true);
+     $arr["files"][$nfs++]["fid"]=$this->file[$ind];
+     }
+    }
+   }
+  else {
+   $arr["send_email"]=true;
+   $SQLStmt="SELECT name,email FROM clients WHERE id=(SELECT client FROM offers WHERE id='".$this->item."')";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting client information");
+   if($row=sql_fetch_array($result)) {
+    if(!$row["email"]) { $arr["error"]="не указан e-mail клиента"; return $arr; }
+    $arr["recipient"]=$row["name"]." &lt;".$row["email"]."&gt;";
+    }
+   $SQLStmt="SELECT name,email FROM users WHERE id='".$auth->GetUserId()."'";
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Error getting manager information");
+   if($row=sql_fetch_array($result)) {
+    if(!$row["email"]) { $arr["error"]="не указан e-mail отправителя"; return $arr; }
+    $arr["sender"]=$row["name"]." &lt;".$row["email"]."&gt;";
+    }
+   if(sizeof($this->filename)>0) {
+    $arr["files"]=Array(); $arr["filename"]=Array(); $arr["fid"]=Array(); $nfs=0;
+    foreach($this->filename as $ind=>$fname) {
+     if(!$fname) continue;
+     if(!$_REQUEST["remove_".$this->file[$ind]]) continue;
+     $arr["files"][$nfs]=Array();
+     $arr["files"][$nfs]["filelink"]="/files/".$this->fdname[$ind];
+     $arr["files"][$nfs]["filename"]=$this->filename[$ind];
+     $arr["files"][$nfs++]["fid"]=$this->file[$ind];
+     }
+    }
+   }
+  $arr["view"]=$this->access_current==2?false:true;
+  return $arr;
+  }
+
+ function BindingForm() {
+  $arr=Array();
+  if($this->access_current==1) $arr["view"]=true;
+  $arr["bookmark"]=2;
+  if($this->binder)
+   $arr=array_merge($arr,$this->binder->ShowBindingsEngine());
+  $arr["qs"]=$this->serializeQueryString(true,true);
+  $arr["view"]=$this->access_current==2?false:true;
+  return $arr;
+  }
+
+ function DisplayNavigation() {
+  global $head_code,$onload_code,$auth,$connid,$script_code;
+  $this->default_cols="12;24";
+  $this->first_col="DATE_FORMAT(date,'%d.%m.%Y')";
+  $this->first_col_name="Дата";
+  $this->first_col_id=82;
+  $this->fragments="'ManagementForm','LinksSet','Linkages','Bookmarks','SetRelations'";
+  if($this->docflow) $this->fragments.=",'Docflow'";
+  if($this->uploads) $this->fragments.=",'UploadFiles'";
+  if($this->comments) $this->fragments.=",'Comments'";
+  $arr=parent::DisplayNavigation();
+  if($this->unclosed)
+   $this->control->FilterList(" (SELECT COUNT(*) FROM sales WHERE sales.offer=offers.id)=0 AND (SELECT COUNT(*) FROM invoices WHERE invoices.offer=offers.id)=0 AND (SELECT COUNT(*) FROM offers `suboffers` WHERE suboffers.offer=offers.id)=0 AND rejected_date IS NULL ");
+  AddScriptCode(" function refreshList(id) {\n
+   if(id<=0) Listoffers.Build(0,null,null);
+   else Listoffers.Build(0,\"folder\",id);
+   \n } \n var fragments=[".$this->fragments."];\n");
+  if($this->bookmark==1)
+   $script_code=preg_replace("/showoffers\(TreeId,ClickType,id,Type,Open\) \{.*\}/isU","showoffers(TreeId,ClickType,id,Type,Open) {\n
+    var target=document.location.toString();
+    target=target.replace(/&created_onbase=[^&]*/ig,'');
+    target=target.replace(/&close_task=[^&]*/ig,'');
+    target=target.replace(/&printall=[^&]*/ig,'');
+    target=target.replace(/&result=[^&]*/ig,'');
+    target=target.replace(/&errorcode=[^&]*/ig,'');
+    LoadTable(id,'idi',true,target);
+    }\n",$script_code);
+  else
+   $script_code=preg_replace("/showoffers\(TreeId,ClickType,id,Type,Open\) \{.*\}/isU","showoffers(TreeId,ClickType,id,Type,Open) {\n
+    var target=document.location.toString();
+    target=target.replace(/&created_onbase=[^&]*/ig,'');
+    target=target.replace(/&close_task=[^&]*/ig,'');
+    target=target.replace(/&printall=[^&]*/ig,'');
+    target=target.replace(/&idi=[^&]*/ig,'');
+    target=target.replace(/&bookmark=[^&]*/ig,'');
+    target=target.replace(/&result=[^&]*/ig,'');
+    target=target.replace(/&errorcode=[^&]*/ig,'');
+    document.location=target+'&idi='+id;
+    }\n",$script_code);
+  $arr["control"]=$this->control->PrintHTML();
+  if($this->unclosed) $arr["unclosed"]=true;
+  $arr["view"]=$this->access_current==2?false:true;
+  $arr["buttons"]=$this->control->ShowToolbar();
+  return $arr;
+  }
+
+ function HandlePrintAll() {
+  global $auth,$connid,$onload_code;
+  if($_REQUEST["printall"]) {
+   $this->DisplayNavigation();
+   $SQLStmt=$this->control->GetQuery();
+   if($this->unclosed) $SQLStmt.=" AND (SELECT COUNT(*) FROM sales WHERE sales.offer=offers.id)=0 AND (SELECT COUNT(*) FROM invoices WHERE invoices.offer=offers.id)=0 AND (SELECT COUNT(*) FROM offers `suboffers` WHERE suboffers.offer=offers.id)=0 AND rejected_date IS NULL ";
+   $SQLStmt=str_replace("ORDER BY"," AND ".str_replace("_RECORD_ID",$this->table.".id",CreateAccessCheckSF($this->module))." ORDER BY",$SQLStmt);
+   if($_REQUEST["checked"])
+    $SQLStmt=str_replace(" FROM ".$this->table." WHERE del=0"," FROM ".$this->table." WHERE del=0 AND id IN (".$_REQUEST["checked"].")",$SQLStmt);
+   $SQLStmt="SELECT id,".substr($SQLStmt,7);
+   if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка печати элементов справочника");
+   while($row=sql_fetch_array($result)) {
+    if($first) $first=false;
+    else $prints.=",";
+    $prints.=$row["id"];
+    $num++;
+    }
+   if(($num)&&($prints)) {
+    $SQLStmt="INSERT INTO print_queries VALUES('".$auth->GetUserId()."','".$_COOKIE["auth_session"]."','".$this->module."','".$prints."')";
+    if(!($result=sql_query($SQLStmt,$connid))) report_error("Ошибка печати элементов справочника");
+    $onload_code.=" window.open('/dialogs/PrintDocuments.php?doctype=".$this->module."'); ";
+    $this->result.="Экспортировано для печати $num документов";
+    }
+   }
+  }
+
+ }
+
+?>
